@@ -199,15 +199,65 @@ def entrenar_modelo(
     return model_data
 
 
+# ─── Configuración de Temporadas Estacionales (Calzado Ecuador) ───
+
+TEMPORADAS_CONFIG: dict[str, dict[str, Any]] = {
+    "REGULAR": {
+        "nombre": "Temporada Regular",
+        "descripcion": "Proyección de rotación estándar basada en historial reciente de ventas",
+        "multiplicador_default": 1.0,
+        "keywords_match": [],
+        "multiplicador_match": 1.0,
+    },
+    "CLASES_SIERRA": {
+        "nombre": "Inicio de Clases Sierra / Amazonía",
+        "descripcion": "Pico de demanda en calzado escolar, mocasines colegiales y calzado juvenil de cuero (Agosto - Octubre)",
+        "multiplicador_default": 1.35,
+        "keywords_match": ["escolar", "colegial", "mocas", "estudiantil", "negro", "juvenil", "botin"],
+        "multiplicador_match": 2.2,
+    },
+    "CLASES_COSTA": {
+        "nombre": "Inicio de Clases Costa / Galápagos",
+        "descripcion": "Alta demanda de calzado escolar y colegial para el régimen Costa (Febrero - Mayo)",
+        "multiplicador_default": 1.25,
+        "keywords_match": ["escolar", "colegial", "mocas", "estudiantil", "negro"],
+        "multiplicador_match": 2.0,
+    },
+    "NAVIDAD_FIN_ANIO": {
+        "nombre": "Navidad & Fin de Año",
+        "descripcion": "Temporada alta general de comercio: calzado formal de vestir, botas, botines de gala y compras por mayor",
+        "multiplicador_default": 1.6,
+        "keywords_match": ["formal", "vestir", "bota", "botin", "tacon", "gala", "elegante", "casual"],
+        "multiplicador_match": 1.9,
+    },
+    "DIA_MADRE_PADRE": {
+        "nombre": "Día de la Madre y Padre",
+        "descripcion": "Incremento de ventas en calzado ejecutivo, casual de cuero, líneas de confort y dama/caballero",
+        "multiplicador_default": 1.4,
+        "keywords_match": ["dama", "caballero", "confort", "clasico", "casual", "oxford", "sandalia"],
+        "multiplicador_match": 1.75,
+    },
+    "FERIA_CEVALLOS": {
+        "nombre": "Feria del Calzado & Fiestas de Cevallos",
+        "descripcion": "Pico comercial por turismo de compras y pedidos mayoristas en locales de Cevallos y Tungurahua",
+        "multiplicador_default": 1.5,
+        "keywords_match": ["cuero", "casual", "botin", "oxford", "bota", "artesanal"],
+        "multiplicador_match": 1.8,
+    },
+}
+
+
 # ─── Predicción ──────────────────────────────────────────────
 
 def predecir_demanda(
     tenant_id: str,
     ventas: list[VentaHistorica],
     horizonte_dias: int,
+    temporada: str = "REGULAR",
 ) -> PrediccionResponse:
     """
-    Genera predicciones de demanda para los próximos `horizonte_dias`.
+    Genera predicciones de demanda para los próximos `horizonte_dias`,
+    aplicando ponderadores del escenario estacional seleccionado.
     Entrena automáticamente si no existe modelo previo.
     """
     model_data = _get_modelo(tenant_id)
@@ -217,8 +267,11 @@ def predecir_demanda(
     gbr = model_data["model"]
     le_modelo = model_data["le_modelo"]
     le_serie = model_data["le_serie"]
-    le_canal = model_data["le_canal"]
     df_hist = model_data["df_historico"]
+
+    # Obtener configuración de temporada
+    temp_key = temporada if temporada in TEMPORADAS_CONFIG else "REGULAR"
+    temp_info = TEMPORADAS_CONFIG[temp_key]
 
     # Productos únicos
     productos = (
@@ -241,8 +294,8 @@ def predecir_demanda(
     fechas_futuras = pd.date_range(start=fecha_inicio, periods=horizonte_dias, freq="D")
 
     for _, prod in productos.iterrows():
-        modelo_nombre = prod["modelo"]
-        serie_nombre = prod["serie"]
+        modelo_nombre = str(prod["modelo"])
+        serie_nombre = str(prod["serie"])
         talla_val = int(prod["talla"])
 
         try:
@@ -251,7 +304,7 @@ def predecir_demanda(
         except ValueError:
             continue
 
-        demanda_total = 0
+        demanda_base_total = 0.0
         for fecha in fechas_futuras:
             row = {
                 "dia_semana": fecha.dayofweek,
@@ -272,14 +325,27 @@ def predecir_demanda(
             }
             X_pred = np.array([[row[c] for c in FEATURE_COLS]])
             pred = gbr.predict(X_pred)[0]
-            demanda_total += max(0, pred)
+            demanda_base_total += max(0.0, float(pred))
 
-        demanda_estimada = max(1, int(round(demanda_total)))
+        demanda_base = max(1, int(round(demanda_base_total)))
+
+        # ─── Cálculo de Factor Estacional ───
+        nombre_completo = f"{modelo_nombre} {serie_nombre}".lower()
+        keywords = temp_info.get("keywords_match", [])
+        coincide_keyword = any(kw in nombre_completo for kw in keywords)
+
+        if coincide_keyword:
+            factor_estacional = float(temp_info.get("multiplicador_match", 1.0))
+        else:
+            factor_estacional = float(temp_info.get("multiplicador_default", 1.0))
+
+        demanda_estimada = max(1, int(round(demanda_base * factor_estacional)))
+        impacto_pct = round((factor_estacional - 1.0) * 100, 1)
+
         tendencia_val = float(prod["ultima_tendencia"])
-
-        if tendencia_val > 0.3:
+        if factor_estacional > 1.2 or tendencia_val > 0.3:
             tendencia = "ALZA"
-        elif tendencia_val < -0.3:
+        elif tendencia_val < -0.3 and factor_estacional <= 1.0:
             tendencia = "BAJA"
         else:
             tendencia = "ESTABLE"
@@ -288,8 +354,8 @@ def predecir_demanda(
         r2 = model_data["r2_score"]
         confianza = max(0.1, min(0.99, r2 * 0.7 + 0.3))
 
-        # Sugerencia de reorden: demanda + margen de seguridad 20%
-        sugerencia = max(1, int(round(demanda_estimada * 1.2)))
+        # Sugerencia de reorden: demanda estimada + margen de seguridad 25%
+        sugerencia = max(1, int(round(demanda_estimada * 1.25)))
 
         predicciones.append(
             PrediccionItem(
@@ -297,26 +363,33 @@ def predecir_demanda(
                 serie=serie_nombre,
                 talla=talla_val,
                 demanda_estimada=demanda_estimada,
+                demanda_base=demanda_base,
+                factor_estacional=factor_estacional,
+                impacto_estacional_pct=impacto_pct,
                 confianza=round(confianza, 2),
                 tendencia=tendencia,
                 sugerencia_reorden=sugerencia,
             )
         )
 
-    # Ordenar por demanda descendente
+    # Ordenar por demanda estimada descendente
     predicciones.sort(key=lambda p: p.demanda_estimada, reverse=True)
 
-    # Alertas: top 5 con mayor demanda
+    # Alertas: top 5 con mayor requerimiento estacional
     for p in predicciones[:5]:
         alertas.append(
             f"{p.modelo} ({p.serie}) T{p.talla}: "
-            f"demanda estimada {p.demanda_estimada} uds"
+            f"proyección {p.demanda_estimada} pares ({'+' if p.impacto_estacional_pct >= 0 else ''}{p.impacto_estacional_pct}% en {temp_info['nombre']})"
         )
 
     return PrediccionResponse(
         tenant_id=tenant_id,
         horizonte_dias=horizonte_dias,
         total_productos_analizados=len(predicciones),
+        temporada_activa=temp_key,
+        temporada_nombre=temp_info["nombre"],
+        temporada_descripcion=temp_info["descripcion"],
+        multiplicador_global=temp_info["multiplicador_default"],
         predicciones=predicciones,
         modelo_score=round(model_data["r2_score"], 4),
         alerta_stock_bajo=alertas,

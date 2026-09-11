@@ -78,6 +78,7 @@ async def generar_prediccion(body: PrediccionRequest):
             tenant_id=body.tenant_id,
             ventas=body.ventas,
             horizonte_dias=body.horizonte_dias,
+            temporada=body.temporada,
         )
         logger.info(
             "Predicción generada para tenant=%s — %d productos analizados",

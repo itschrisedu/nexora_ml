@@ -33,6 +33,10 @@ class PrediccionRequest(BaseModel):
         le=180,
         description="Días a futuro para la predicción",
     )
+    temporada: str = Field(
+        default="REGULAR",
+        description="Escenario estacional: REGULAR | CLASES_SIERRA | CLASES_COSTA | NAVIDAD_FIN_ANIO | DIA_MADRE_PADRE | FERIA_CEVALLOS",
+    )
 
 
 class ReentrenamientoRequest(BaseModel):
@@ -51,7 +55,16 @@ class PrediccionItem(BaseModel):
     serie: str
     talla: int
     demanda_estimada: int = Field(
-        ..., description="Unidades estimadas en el horizonte"
+        ..., description="Unidades estimadas en el horizonte (ajustadas por temporada)"
+    )
+    demanda_base: int = Field(
+        default=0, description="Demanda histórica regular no estacional"
+    )
+    factor_estacional: float = Field(
+        default=1.0, description="Multiplicador estacional aplicado"
+    )
+    impacto_estacional_pct: float = Field(
+        default=0.0, description="Incremento o decremento porcentual estimado"
     )
     confianza: float = Field(
         ..., ge=0, le=1, description="Nivel de confianza de la predicción"
@@ -60,7 +73,7 @@ class PrediccionItem(BaseModel):
         ..., description="ALZA | ESTABLE | BAJA"
     )
     sugerencia_reorden: int = Field(
-        ..., description="Cantidad sugerida a re-ordenar"
+        ..., description="Cantidad sugerida a re-ordenar a talleres"
     )
 
 
@@ -70,13 +83,17 @@ class PrediccionResponse(BaseModel):
     tenant_id: str
     horizonte_dias: int
     total_productos_analizados: int
+    temporada_activa: str = "REGULAR"
+    temporada_nombre: str = "Temporada Regular"
+    temporada_descripcion: str = "Proyección de rotación estándar basada en historial"
+    multiplicador_global: float = 1.0
     predicciones: list[PrediccionItem]
     modelo_score: float = Field(
         ..., description="R² score del modelo entrenado"
     )
     alerta_stock_bajo: list[str] = Field(
         default_factory=list,
-        description="Productos con predicción de demanda > stock actual",
+        description="Productos con predicción de demanda alta o reorden prioritario",
     )
 
 
